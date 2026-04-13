@@ -42,6 +42,19 @@ function normalizeRegistrationPayload(body = {}) {
   };
 }
 
+function normalizeCandidateContext(body = {}) {
+  const normalizedEmail = typeof body.candidate_email === 'string'
+    ? body.candidate_email.trim().toLowerCase()
+    : undefined;
+
+  return {
+    candidateId: typeof body.candidate_id === 'string' ? body.candidate_id.trim() : undefined,
+    candidateName: typeof body.candidate_name === 'string' ? body.candidate_name.trim() : undefined,
+    candidateEmail: normalizedEmail,
+    candidateIsConfirmed: parseBooleanLike(body.candidate_is_confirmed, true)
+  };
+}
+
 function validateRegistrationPayload(payload) {
   if (!payload.name) {
     return 'name is required.';
@@ -166,41 +179,18 @@ async function logout(req, res, next) {
 
 async function getPosts(req, res, next) {
   try {
-    const accessToken = getCookieToken(req, 'access_tokens', 'access_token');
-    const refreshToken = getCookieToken(req, 'refresh_tokens', 'refresh_token');
-
-    if (!accessToken || !refreshToken) {
-      const error = new Error('unauth');
-      error.statusCode = 401;
-      throw error;
-    }
-
-    const posts = await getActiveJobPostsForCandidate({ accessToken, refreshToken });
+    const posts = await getActiveJobPostsForCandidate();
     return res.status(200).json(success(posts, 'active job posts retrieved successfully'));
   } catch (error) {
-    if (error.statusCode === 401) {
-      return next(error);
-    }
-
     return res.status(200).json(success([], 'active job posts retrieved successfully'));
   }
 }
 
 async function uploadResume(req, res, next) {
   try {
-    const accessToken = getCookieToken(req, 'access_tokens', 'access_token');
-    const refreshToken = getCookieToken(req, 'refresh_tokens', 'refresh_token');
-
-    if (!accessToken || !refreshToken) {
-      const error = new Error('unauth');
-      error.statusCode = 401;
-      throw error;
-    }
-
     await uploadCandidateResume({
-      accessToken,
-      refreshToken,
-      file: req.file
+      file: req.file,
+      candidateContext: normalizeCandidateContext(req.body)
     });
 
     return res.status(200).json(success(null, 'we received the cv successfully'));
@@ -249,21 +239,11 @@ async function submitApplication(req, res, next) {
 
 async function scoreResume(req, res, next) {
   try {
-    const accessToken = getCookieToken(req, 'access_tokens', 'access_token');
-    const refreshToken = getCookieToken(req, 'refresh_tokens', 'refresh_token');
-
-    if (!accessToken || !refreshToken) {
-      const error = new Error('unauth');
-      error.statusCode = 401;
-      throw error;
-    }
-
     const scored = await scoreCandidateResume({
-      accessToken,
-      refreshToken,
       fileId: req.body?.file_id,
       jobId: req.body?.job_id,
-      file: req.file
+      file: req.file,
+      candidateContext: normalizeCandidateContext(req.body)
     });
 
     return res.status(200).json(success(scored, 'resume scored successfully'));
@@ -281,18 +261,7 @@ async function scoreResume(req, res, next) {
 
 async function chat(req, res, next) {
   try {
-    const accessToken = getCookieToken(req, 'access_tokens', 'access_token');
-    const refreshToken = getCookieToken(req, 'refresh_tokens', 'refresh_token');
-
-    if (!accessToken || !refreshToken) {
-      const error = new Error('unauth');
-      error.statusCode = 401;
-      throw error;
-    }
-
     const result = await chatCandidate({
-      accessToken,
-      refreshToken,
       jobId: req.body?.job_id,
       question: req.body?.question
     });
