@@ -12,6 +12,13 @@ const config = require('../config/env');
 const { mongoose } = require('../config/database');
 
 const ALLOWED_RESUME_EXTENSIONS = new Set(['.txt', '.docx', '.pdf']);
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const ANONYMOUS_CANDIDATE_CONTEXT = {
+  candidateId: 'anonymous',
+  candidateName: 'Anonymous Candidate',
+  candidateEmail: 'anonymous@local.invalid',
+  candidateIsConfirmed: true
+};
 
 function createClientError(message, statusCode = 400) {
   const error = new Error(message);
@@ -130,11 +137,50 @@ function ensureCandidateConfirmed(candidate) {
   }
 }
 
-async function getActiveJobPostsForCandidate({ accessToken, refreshToken }) {
-  await getActiveCandidateSession({ accessToken, refreshToken });
+function ensureDatabaseReady() {
+  if (!mongoose.connection?.db || mongoose.connection.readyState !== 1) {
+    throw createClientError('service unavailable', 503);
+  }
+}
+
+async function getActiveJobPostsForCandidate() {
+  if (!mongoose.connection?.db || mongoose.connection.readyState !== 1) {
+    return [];
+  }
 
   const posts = await JobPostModel.find({ is_active: true }).sort({ posted_at: -1 }).lean();
   return Array.isArray(posts) ? posts : [];
+}
+
+function normalizeOptionalString(value) {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const normalized = value.trim();
+  return normalized || null;
+}
+
+function normalizeCandidateContext(candidateContext = {}) {
+  const candidateId = normalizeOptionalString(candidateContext.candidateId) || ANONYMOUS_CANDIDATE_CONTEXT.candidateId;
+  const candidateName = normalizeOptionalString(candidateContext.candidateName) || ANONYMOUS_CANDIDATE_CONTEXT.candidateName;
+  const candidateEmail = (normalizeOptionalString(candidateContext.candidateEmail)
+    || ANONYMOUS_CANDIDATE_CONTEXT.candidateEmail).toLowerCase();
+
+  if (!EMAIL_REGEX.test(candidateEmail)) {
+    throw createClientError('candidate_email format is invalid.', 400);
+  }
+
+  const candidateIsConfirmed = typeof candidateContext.candidateIsConfirmed === 'boolean'
+    ? candidateContext.candidateIsConfirmed
+    : ANONYMOUS_CANDIDATE_CONTEXT.candidateIsConfirmed;
+
+  return {
+    candidateId,
+    candidateName,
+    candidateEmail,
+    candidateIsConfirmed
+  };
 }
 
 function validateResumeFile(file) {
@@ -424,7 +470,7 @@ async function callChatApi({ fullInfo, question }) {
   };
 }
 
-async function resolveResumeForScoring({ fileId, file, candidate }) {
+async function resolveResumeForScoring({ fileId, file, candidateContext }) {
   if (file) {
     validateResumeFile(file);
 
@@ -433,7 +479,7 @@ async function resolveResumeForScoring({ fileId, file, candidate }) {
       filename: file.originalname,
       contentType: file.mimetype,
       metadata: {
-        candidate_id: String(candidate._id)
+        candidate_id: candidateContext.candidateId
       }
     });
 
@@ -454,25 +500,26 @@ async function resolveResumeForScoring({ fileId, file, candidate }) {
   return getGridFsFileById(fileId.trim());
 }
 
-async function uploadCandidateResume({ accessToken, refreshToken, file, postId = null }) {
+async function uploadCandidateResume({ file, postId = null, candidateContext = {} }) {
   validateResumeFile(file);
-  const candidate = await getActiveCandidateSession({ accessToken, refreshToken });
+  ensureDatabaseReady();
+  const normalizedCandidateContext = normalizeCandidateContext(candidateContext);
 
   const gridFsId = await uploadBufferToGridFs({
     fileBuffer: file.buffer,
     filename: file.originalname,
     contentType: file.mimetype,
     metadata: {
-      candidate_id: String(candidate._id)
+      candidate_id: normalizedCandidateContext.candidateId
     }
   });
 
   const uploadedResume = await UploadedResumeModel.create({
     post_id: typeof postId === 'string' && postId.trim() ? postId.trim() : null,
-    candidate_id: String(candidate._id),
-    candidate_name: candidate.name,
-    candidate_email: candidate.email,
-    candidate_is_confirmed: candidate.is_confirmed,
+    candidate_id: normalizedCandidateContext.candidateId,
+    candidate_name: normalizedCandidateContext.candidateName,
+    candidate_email: normalizedCandidateContext.candidateEmail,
+    candidate_is_confirmed: normalizedCandidateContext.candidateIsConfirmed,
     resume_rate: null,
     resume_gridfs_id: gridFsId
   });
@@ -519,13 +566,13 @@ async function submitCandidateApplication({ accessToken, refreshToken, postId, f
   });
 }
 
-async function scoreCandidateResume({ accessToken, refreshToken, fileId, jobId, file }) {
+async function scoreCandidateResume({ fileId, jobId, file, candidateContext = {} }) {
   if (typeof jobId !== 'string' || !jobId.trim()) {
     throw createClientError('job_id is required.', 400);
   }
 
-  const candidate = await getActiveCandidateSession({ accessToken, refreshToken });
-  ensureCandidateConfirmed(candidate);
+  ensureDatabaseReady();
+  const normalizedCandidateContext = normalizeCandidateContext(candidateContext);
 
   const post = await JobPostModel.findById(jobId.trim()).lean();
 
@@ -534,7 +581,11 @@ async function scoreCandidateResume({ accessToken, refreshToken, fileId, jobId, 
   }
 
   const fullInfo = buildFullInfo(post);
-  const { fileDoc, readyFile } = await resolveResumeForScoring({ fileId, file, candidate });
+  const { fileDoc, readyFile } = await resolveResumeForScoring({
+    fileId,
+    file,
+    candidateContext: normalizedCandidateContext
+  });
   const result = await callScoreResumeApi({
     fullInfo,
     readyFile,
@@ -549,7 +600,7 @@ async function scoreCandidateResume({ accessToken, refreshToken, fileId, jobId, 
   }
 
   await updateUploadedResumeRateFromScore({
-    candidateId: String(candidate._id),
+    candidateId: normalizedCandidateContext.candidateId,
     postId: String(post._id),
     fileGridFsId: String(fileDoc._id),
     scoreValue
@@ -557,10 +608,10 @@ async function scoreCandidateResume({ accessToken, refreshToken, fileId, jobId, 
 
   const scoreDoc = await ScoreModel.create({
     post_id: String(post._id),
-    candidate_id: String(candidate._id),
-    candidate_name: candidate.name,
-    candidate_email: candidate.email,
-    candidate_is_confirmed: candidate.is_confirmed,
+    candidate_id: normalizedCandidateContext.candidateId,
+    candidate_name: normalizedCandidateContext.candidateName,
+    candidate_email: normalizedCandidateContext.candidateEmail,
+    candidate_is_confirmed: normalizedCandidateContext.candidateIsConfirmed,
     file_id: String(fileDoc._id),
     result
   });
@@ -571,7 +622,7 @@ async function scoreCandidateResume({ accessToken, refreshToken, fileId, jobId, 
   };
 }
 
-async function chatCandidate({ accessToken, refreshToken, jobId, question }) {
+async function chatCandidate({ jobId, question }) {
   if (typeof jobId !== 'string' || !jobId.trim()) {
     throw createClientError('job_id is required.', 400);
   }
@@ -580,9 +631,7 @@ async function chatCandidate({ accessToken, refreshToken, jobId, question }) {
     throw createClientError('question is required.', 400);
   }
 
-  const candidate = await getActiveCandidateSession({ accessToken, refreshToken });
-  ensureCandidateConfirmed(candidate);
-
+  ensureDatabaseReady();
   const post = await JobPostModel.findById(jobId.trim()).lean();
 
   if (!post) {

@@ -251,12 +251,12 @@ describe('Health API', () => {
 		expect(response.body.message).toBe('no active sessions');
 	});
 
-	it('returns unauth when candidate get-posts cookies are missing', async () => {
+	it('returns candidate get-posts without requiring cookies', async () => {
 		const response = await request(app).get('/candidate/get-posts');
 
-		expect(response.statusCode).toBe(401);
-		expect(response.body.success).toBe(false);
-		expect(response.body.message).toBe('unauth');
+		expect(response.statusCode).toBe(200);
+		expect(response.body.success).toBe(true);
+		expect(Array.isArray(response.body.data)).toBe(true);
 	});
 
 	it('rejects raw JSON payload for candidate upload-resume endpoint', async () => {
@@ -269,15 +269,15 @@ describe('Health API', () => {
 		expect(response.body.success).toBe(false);
 	});
 
-	it('returns unauth when candidate upload-resume cookies are missing', async () => {
+	it('does not require cookies for candidate upload-resume endpoint', async () => {
 		const response = await request(app)
 			.post('/candidate/upload-resume')
 			.type('form')
 			.attach('file', Buffer.from('sample resume'), 'resume.txt');
 
-		expect(response.statusCode).toBe(401);
+		expect(response.statusCode).toBe(503);
 		expect(response.body.success).toBe(false);
-		expect(response.body.message).toBe('unauth');
+		expect(response.body.message).toBe('Internal Server Error');
 	});
 
 	it('returns 404 when file does not exist in GridFS', async () => {
@@ -320,15 +320,15 @@ describe('Health API', () => {
 		expect(response.body.success).toBe(false);
 	});
 
-	it('returns unauth when candidate score-resume cookies are missing', async () => {
+	it('does not require cookies for candidate score-resume endpoint', async () => {
 		const response = await request(app)
 			.post('/candidate/score-resume')
 			.type('form')
 			.send({ file_id: '680000000000000000000000', job_id: '680000000000000000000001' });
 
-		expect(response.statusCode).toBe(401);
+		expect(response.statusCode).toBe(503);
 		expect(response.body.success).toBe(false);
-		expect(response.body.message).toBe('unauth');
+		expect(response.body.message).toBe('Internal Server Error');
 	});
 
 	it('rejects raw JSON payload for candidate chat endpoint', async () => {
@@ -341,14 +341,14 @@ describe('Health API', () => {
 		expect(response.body.success).toBe(false);
 	});
 
-	it('returns unauth when candidate chat cookies are missing', async () => {
+	it('does not require cookies for candidate chat endpoint', async () => {
 		const response = await request(app)
 			.post('/candidate/chat')
 			.type('form')
 			.send({ question: 'What are the key requirements?', job_id: '680000000000000000000001' });
 
-		expect(response.statusCode).toBe(401);
+		expect(response.statusCode).toBe(503);
 		expect(response.body.success).toBe(false);
-		expect(response.body.message).toBe('unauth');
+		expect(response.body.message).toBe('Internal Server Error');
 	});
 });
