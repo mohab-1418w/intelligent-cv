@@ -221,6 +221,7 @@ async function submitApplication(req, res, next) {
       accessToken,
       refreshToken,
       postId: req.body?.post_id,
+      body: req.body,
       file: req.file
     });
 
