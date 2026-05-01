@@ -3,6 +3,8 @@ const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const HrModel = require('../models/hr.model');
 const UploadedResumeModel = require('../models/uploaded-resume.model');
+const JobPostModel = require('../models/job-post.model');
+const SubmittedApplicationModel = require('../models/submitted-application.model');
 const config = require('../config/env');
 const { mongoose } = require('../config/database');
 const { sendConfirmationCodeEmail } = require('./email.service');
@@ -28,6 +30,10 @@ function isCodeExpired(expiresAt) {
   }
 
   return new Date(expiresAt).getTime() < Date.now();
+}
+
+function toTrimmedString(value) {
+  return typeof value === 'string' ? value.trim() : '';
 }
 
 async function findActivePrincipal(accessToken, refreshToken) {
@@ -253,6 +259,138 @@ async function rankCandidatesByResumeRate({ accessToken, refreshToken, postId })
   return resumes.map((resume, index) => normalizeRankedResume(resume, index + 1));
 }
 
+function buildAcceptRejectWebhookEndpoint(webhookUrl) {
+  return String(webhookUrl || '').trim();
+}
+
+async function callAcceptRejectCandidateWebhook({ candidateName, candidateEmail, status, jobTitle }) {
+  const webhookUrl = buildAcceptRejectWebhookEndpoint(config.n8nApplyWebhookUrl3);
+
+  if (!webhookUrl) {
+    throw createClientError('accept/reject candidate webhook is not configured.', 503);
+  }
+
+  if (!candidateName || !candidateEmail || !status || !jobTitle) {
+    throw createClientError('accept/reject candidate webhook payload is incomplete.', 400);
+  }
+
+  const controller = new AbortController();
+  const timeoutMs = 10000;
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(webhookUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        name: candidateName,
+        email: candidateEmail,
+        status,
+        jobTitle
+      }),
+      signal: controller.signal
+    });
+
+    if (!response.ok) {
+      let responseDetails = '';
+
+      try {
+        responseDetails = await response.text();
+      } catch (_error) {
+        responseDetails = '';
+      }
+
+      const error = createClientError('failed to deliver candidate status email workflow', 502);
+      error.details = responseDetails ? responseDetails.slice(0, 500) : undefined;
+      throw error;
+    }
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      const timeoutError = createClientError('candidate status email workflow timed out', 504);
+      timeoutError.details = `Request exceeded ${timeoutMs}ms.`;
+      throw timeoutError;
+    }
+
+    if (error?.statusCode) {
+      throw error;
+    }
+
+    const webhookError = createClientError('failed to deliver candidate status email workflow', 502);
+    webhookError.details = error?.message ? String(error.message).slice(0, 500) : undefined;
+    throw webhookError;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+function normalizeAcceptRejectCandidatePayload(rawPayload = {}) {
+  const candidateId = toTrimmedString(rawPayload.candidate_id);
+  const statue = toTrimmedString(rawPayload.statue).toLowerCase();
+
+  if (!candidateId) {
+    throw createClientError('candidate_id is required.', 400);
+  }
+
+  if (!statue) {
+    throw createClientError('statue is required.', 400);
+  }
+
+  if (!['accepted', 'rejected'].includes(statue)) {
+    throw createClientError('statue must be accepted or rejected.', 400);
+  }
+
+  return {
+    candidateId,
+    statue
+  };
+}
+
+async function acceptRejectCandidate({ accessToken, refreshToken, rawPayload = {} }) {
+  await getActiveConfirmedHr({ accessToken, refreshToken });
+
+  const payload = normalizeAcceptRejectCandidatePayload(rawPayload);
+  const submittedApplication = await SubmittedApplicationModel.findOne({
+    candidate_id: payload.candidateId
+  }).sort({ updatedAt: -1, createdAt: -1 });
+
+  if (!submittedApplication) {
+    throw createClientError('submitted application not found', 404);
+  }
+
+  if (!mongoose.isValidObjectId(submittedApplication.post_id)) {
+    throw createClientError('there is no post with that id', 404);
+  }
+
+  const jobPost = await JobPostModel.findById(submittedApplication.post_id).select('title').lean();
+
+  if (!jobPost) {
+    throw createClientError('there is no post with that id', 404);
+  }
+
+  submittedApplication.statue = payload.statue;
+  await submittedApplication.save();
+
+  await callAcceptRejectCandidateWebhook({
+    candidateName: submittedApplication.candidate_name,
+    candidateEmail: submittedApplication.candidate_email,
+    status: submittedApplication.statue,
+    jobTitle: jobPost.title
+  });
+
+  return {
+    _id: submittedApplication._id,
+    post_id: submittedApplication.post_id,
+    candidate_id: submittedApplication.candidate_id,
+    candidate_name: submittedApplication.candidate_name,
+    candidate_email: submittedApplication.candidate_email,
+    resume_id: submittedApplication.resume_id,
+    statue: submittedApplication.statue,
+    jobTitle: jobPost.title
+  };
+}
+
 async function sendEmailConfirmationCode({ accessToken, refreshToken }) {
   const principal = await findActivePrincipal(accessToken, refreshToken);
 
@@ -303,6 +441,7 @@ module.exports = {
   loginHr,
   logoutHr,
   rankCandidatesByResumeRate,
+  acceptRejectCandidate,
   sendEmailConfirmationCode,
   verifyEmailConfirmationCode
 };

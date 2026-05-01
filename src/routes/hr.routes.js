@@ -9,7 +9,8 @@ const {
 	getPosts,
 	updatePost,
 	deletePost,
-	rankCandidates
+	rankCandidates,
+	acceptRejectCandidateStatus
 } = require('../controllers/hr.controller');
 
 const hrRouter = Router();
@@ -42,6 +43,7 @@ hrRouter.post('/add-post', requireFormContentType, formDataParser.none(), addPos
 hrRouter.get('/get-posts', getPosts);
 hrRouter.get('/rank-candidates', rankCandidates);
 hrRouter.put('/update-post', requireFormContentType, formDataParser.none(), updatePost);
+hrRouter.put('/accept-reject-candidate', requireFormContentType, formDataParser.none(), acceptRejectCandidateStatus);
 hrRouter.delete('/delete-post', requireFormContentType, formDataParser.none(), deletePost);
 
 module.exports = hrRouter;

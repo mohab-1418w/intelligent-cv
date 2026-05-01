@@ -29,6 +29,7 @@ const config = {
 	jwtRefreshSecret: process.env.JWT_REFRESH_SECRET || 'change-this-refresh-secret-in-production',
 	n8nApplyWebhookUrl: process.env.N8N_APPLY_WEBHOOK_URL || '',
 	n8nApplyWebhookUrl2: process.env.N8N_APPLY_WEBHOOK_URL_2 || '',
+	n8nApplyWebhookUrl3: process.env.N8N_APPLY_WEBHOOK_URL_3 || '',
 	resendApiKey: process.env.RESEND_API_KEY || '',
 	resendFrom: process.env.RESEND_FROM || process.env.SMTP_FROM || 'onboarding@resend.dev',
 	smtpHost: process.env.SMTP_HOST || '',

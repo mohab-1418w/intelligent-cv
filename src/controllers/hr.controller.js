@@ -3,7 +3,8 @@ const {
   registerHr,
   loginHr,
   logoutHr,
-  rankCandidatesByResumeRate
+  rankCandidatesByResumeRate,
+  acceptRejectCandidate
 } = require('../services/hr.service');
 const {
   addJobPost,
@@ -294,6 +295,37 @@ async function rankCandidates(req, res, next) {
   }
 }
 
+async function acceptRejectCandidateStatus(req, res, next) {
+  try {
+    const accessToken = getCookieToken(req, 'access_tokens', 'access_token');
+    const refreshToken = getCookieToken(req, 'refresh_tokens', 'refresh_token');
+
+    if (!accessToken || !refreshToken) {
+      const error = new Error('unauth');
+      error.statusCode = 401;
+      throw error;
+    }
+
+    const updatedApplication = await acceptRejectCandidate({
+      accessToken,
+      refreshToken,
+      rawPayload: req.body
+    });
+
+    return res.status(200).json(success(updatedApplication, 'candidate status updated successfully'));
+  } catch (error) {
+    if (!error.statusCode) {
+      return res.status(500).json(errorResponse('something wrong happened while updating candidate status'));
+    }
+
+    if (error.statusCode >= 500) {
+      return res.status(error.statusCode).json(errorResponse(error.message));
+    }
+
+    return next(error);
+  }
+}
+
 module.exports = {
   registration,
   login,
@@ -302,5 +334,6 @@ module.exports = {
   getPosts,
   updatePost,
   deletePost,
-  rankCandidates
+  rankCandidates,
+  acceptRejectCandidateStatus
 };
