@@ -2,6 +2,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const path = require('path');
+const { Blob } = require('buffer');
 const { Readable } = require('stream');
 const CandidateModel = require('../models/candidate.model');
 const JobPostModel = require('../models/job-post.model');
@@ -268,6 +269,185 @@ function buildChatEndpoint(baseUrl) {
   return `${normalizedBase}/chat`;
 }
 
+function buildCandidateApplicationWebhookEndpoint(webhookUrl) {
+  return String(webhookUrl || '').trim();
+}
+
+function buildCandidateApplicationFollowUpWebhookEndpoint(webhookUrl) {
+  return String(webhookUrl || '').trim();
+}
+
+function appendFormValue(formData, key, value) {
+  if (value === undefined || value === null) {
+    return;
+  }
+
+  if (typeof value === 'object' && !Buffer.isBuffer(value)) {
+    formData.append(key, JSON.stringify(value));
+    return;
+  }
+
+  formData.append(key, String(value));
+}
+
+function buildCandidateApplicationWebhookFormData({ body = {}, candidate, postId, file }) {
+  const formData = new FormData();
+  const candidateName = candidate?.name || '';
+  const candidateEmail = candidate?.email || '';
+  const jobTitle = typeof body.jobTitle === 'string'
+    ? body.jobTitle.trim()
+    : typeof body.job_title === 'string'
+      ? body.job_title.trim()
+      : typeof body.title === 'string'
+        ? body.title.trim()
+        : '';
+
+  for (const [key, value] of Object.entries(body || {})) {
+    appendFormValue(formData, key, value);
+  }
+
+  appendFormValue(formData, 'post_id', postId);
+  appendFormValue(formData, 'candidate_id', String(candidate?._id || ''));
+  appendFormValue(formData, 'candidate_name', candidateName);
+  appendFormValue(formData, 'candidate_email', candidateEmail);
+  appendFormValue(formData, 'candidate_is_confirmed', candidate?.is_confirmed === true);
+  appendFormValue(formData, 'name', candidateName);
+  appendFormValue(formData, 'email', candidateEmail);
+  appendFormValue(formData, 'jobTitle', jobTitle);
+
+  if (file?.buffer && Buffer.isBuffer(file.buffer)) {
+    formData.append(
+      'file',
+      new Blob([file.buffer], { type: file.mimetype || 'application/octet-stream' }),
+      file.originalname || 'resume.bin'
+    );
+  }
+
+  return formData;
+}
+
+function buildCandidateApplicationFollowUpWebhookFormData({ candidateName, candidateEmail, status, jobTitle }) {
+  const formData = new FormData();
+
+  appendFormValue(formData, 'name', candidateName);
+  appendFormValue(formData, 'email', candidateEmail);
+  appendFormValue(formData, 'status', status);
+  appendFormValue(formData, 'jobTitle', jobTitle);
+
+  return formData;
+}
+
+async function callCandidateApplicationWebhook({ body, candidate, postId, file }) {
+  const webhookUrl = buildCandidateApplicationWebhookEndpoint(config.n8nApplyWebhookUrl);
+
+  if (!webhookUrl) {
+    throw createClientError('candidate application webhook is not configured.', 503);
+  }
+
+  const controller = new AbortController();
+  const timeoutMs = 10000;
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(webhookUrl, {
+      method: 'POST',
+      body: buildCandidateApplicationWebhookFormData({ body, candidate, postId, file }),
+      signal: controller.signal
+    });
+
+    if (!response.ok) {
+      let responseDetails = '';
+
+      try {
+        responseDetails = await response.text();
+      } catch (_error) {
+        responseDetails = '';
+      }
+
+      const error = createClientError('failed to deliver candidate application to workflow', 502);
+      error.details = responseDetails ? responseDetails.slice(0, 500) : undefined;
+      throw error;
+    }
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      const timeoutError = createClientError('candidate application webhook timed out', 504);
+      timeoutError.details = `Request exceeded ${timeoutMs}ms.`;
+      throw timeoutError;
+    }
+
+    if (error?.statusCode) {
+      throw error;
+    }
+
+    const webhookError = createClientError('failed to deliver candidate application to workflow', 502);
+    webhookError.details = error?.message ? String(error.message).slice(0, 500) : undefined;
+    throw webhookError;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function callCandidateApplicationFollowUpWebhook({ candidateName, candidateEmail, status, jobTitle }) {
+  const webhookUrl = buildCandidateApplicationFollowUpWebhookEndpoint(config.n8nApplyWebhookUrl2);
+
+  if (!webhookUrl) {
+    return false;
+  }
+
+  if (!candidateName || !candidateEmail || !status || !jobTitle) {
+    return false;
+  }
+
+  const controller = new AbortController();
+  const timeoutMs = 10000;
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(webhookUrl, {
+      method: 'POST',
+      body: buildCandidateApplicationFollowUpWebhookFormData({
+        candidateName,
+        candidateEmail,
+        status,
+        jobTitle
+      }),
+      signal: controller.signal
+    });
+
+    if (!response.ok) {
+      let responseDetails = '';
+
+      try {
+        responseDetails = await response.text();
+      } catch (_error) {
+        responseDetails = '';
+      }
+
+      const error = createClientError('failed to deliver candidate follow-up email workflow', 502);
+      error.details = responseDetails ? responseDetails.slice(0, 500) : undefined;
+      throw error;
+    }
+
+    return true;
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      const timeoutError = createClientError('candidate follow-up webhook timed out', 504);
+      timeoutError.details = `Request exceeded ${timeoutMs}ms.`;
+      throw timeoutError;
+    }
+
+    if (error?.statusCode) {
+      throw error;
+    }
+
+    const webhookError = createClientError('failed to deliver candidate follow-up email workflow', 502);
+    webhookError.details = error?.message ? String(error.message).slice(0, 500) : undefined;
+    throw webhookError;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 function extractNumericScoreValue(result) {
   const candidateKeys = new Set([
     'score',
@@ -527,7 +707,7 @@ async function uploadCandidateResume({ file, postId = null, candidateContext = {
   return uploadedResume;
 }
 
-async function submitCandidateApplication({ accessToken, refreshToken, postId, file }) {
+async function submitCandidateApplication({ accessToken, refreshToken, postId, body = {}, file }) {
   if (typeof postId !== 'string' || !postId.trim()) {
     throw createClientError('post_id is required.', 400);
   }
@@ -548,6 +728,32 @@ async function submitCandidateApplication({ accessToken, refreshToken, postId, f
     throw createClientError('you already submitted an application for this post, try to submit in another post.', 400);
   }
 
+  let jobTitle = typeof body.jobTitle === 'string' ? body.jobTitle.trim() : '';
+
+  if (!jobTitle && mongoose.isValidObjectId(normalizedPostId)) {
+    const post = await JobPostModel.findById(normalizedPostId).select('title').lean();
+    jobTitle = post?.title || '';
+  }
+
+  const eligibleResume = await UploadedResumeModel.findOne({
+    candidate_id: candidateId,
+    post_id: normalizedPostId,
+    resume_rate: { $gte: 80 }
+  })
+    .sort({ updatedAt: -1, createdAt: -1 })
+    .select('resume_rate')
+    .lean();
+
+  await callCandidateApplicationWebhook({
+    body: {
+      ...body,
+      jobTitle
+    },
+    candidate,
+    postId: normalizedPostId,
+    file
+  });
+
   const uploadedResume = await uploadCandidateResume({
     accessToken,
     refreshToken,
@@ -555,7 +761,7 @@ async function submitCandidateApplication({ accessToken, refreshToken, postId, f
     postId: normalizedPostId
   });
 
-  await SubmittedApplicationModel.create({
+  const submittedApplication = await SubmittedApplicationModel.create({
     post_id: normalizedPostId,
     candidate_id: candidateId,
     candidate_name: candidate.name,
@@ -564,6 +770,25 @@ async function submitCandidateApplication({ accessToken, refreshToken, postId, f
     resume_id: String(uploadedResume._id),
     statue: 'pending'
   });
+
+  if (Number.isFinite(eligibleResume?.resume_rate)) {
+    const candidateFollowUpStatus = submittedApplication?.statue || submittedApplication?.status || 'pending';
+
+    try {
+      await callCandidateApplicationFollowUpWebhook({
+        candidateName: candidate.name,
+        candidateEmail: candidate.email,
+        status: candidateFollowUpStatus,
+        jobTitle
+      });
+    } catch (error) {
+      console.error('candidate follow-up webhook failed', {
+        candidateId,
+        postId: normalizedPostId,
+        error: error?.message || error
+      });
+    }
+  }
 }
 
 async function scoreCandidateResume({ fileId, jobId, file, candidateContext = {} }) {
